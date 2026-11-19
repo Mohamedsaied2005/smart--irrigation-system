@@ -60,3 +60,6 @@ Dr. Mohamed Torad
 ---
 
 **Academic Project | IoT | Embedded Systems | Automation**
+## Circuit Diagram
+
+![Smart Irrigation Circuit Diagram](photo_6051072642317488310_y.jpg)
