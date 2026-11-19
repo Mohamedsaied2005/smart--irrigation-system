@@ -1,0 +1,357 @@
+#define BLYNK_TEMPLATE_ID   "YOUR_TEMPLATE_ID"
+#define BLYNK_TEMPLATE_NAME "Smart Irrigation System"
+#define BLYNK_AUTH_TOKEN    "YOUR_AUTH_TOKEN"
+
+#define BLYNK_PRINT Serial
+
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <DHT.h>
+
+// ================= WIFI =================
+
+char ssid[] = "YOUR_WIFI_NAME";
+char pass[] = "YOUR_WIFI_PASSWORD";
+
+// ================= PIN CONFIGURATION =================
+
+#define SOIL_PIN 34
+#define DHT_PIN  4
+#define LDR_PIN  35
+#define TDS_PIN  32
+#define RELAY_PIN 26
+
+#define DHT_TYPE DHT11
+
+DHT dht(DHT_PIN, DHT_TYPE);
+BlynkTimer timer;
+
+// ================= RELAY CONFIGURATION =================
+
+// Most 5V relay modules are ACTIVE LOW.
+// Change these two values if your module works oppositely.
+
+#define RELAY_ON  LOW
+#define RELAY_OFF HIGH
+
+// ================= SOIL CALIBRATION =================
+
+// IMPORTANT: Replace these with your actual sensor readings.
+// DRY = reading in dry soil.
+// WET = reading in fully wet soil.
+
+const int SOIL_DRY = 3000;
+const int SOIL_WET = 1300;
+
+// ================= VARIABLES =================
+
+float temperature = 25.0;
+float humidity = 0.0;
+
+float soilMoisture = 0.0;
+float tdsValue = 0.0;
+float lightIntensity = 0.0;
+
+bool autoMode = false;
+bool manualMode = false;
+bool pumpState = false;
+
+bool dhtValid = false;
+
+// ================= HELPER FUNCTIONS =================
+
+int readAverage(int pin, int samples = 10) {
+
+  long total = 0;
+
+  for (int i = 0; i < samples; i++) {
+    total += analogRead(pin);
+    delay(2);
+  }
+
+  return total / samples;
+}
+
+float limitValue(float value, float minimum, float maximum) {
+  return constrain(value, minimum, maximum);
+}
+
+// ================= PUMP CONTROL =================
+
+void setPump(bool state) {
+
+  pumpState = state;
+
+  digitalWrite(RELAY_PIN, state ? RELAY_ON : RELAY_OFF);
+
+  Serial.print("Pump: ");
+  Serial.println(state ? "ON" : "OFF");
+}
+
+void updatePump() {
+
+  // MANUAL MODE HAS PRIORITY
+
+  if (manualMode) {
+    setPump(true);
+    return;
+  }
+
+  // AUTOMATIC MODE
+
+  if (autoMode) {
+
+    if (soilMoisture < 80.0) {
+      setPump(true);
+    }
+    else {
+      setPump(false);
+    }
+
+    return;
+  }
+
+  // BOTH MODES OFF
+
+  setPump(false);
+}
+
+// ================= BLYNK SWITCHES =================
+
+// V0 = AUTOMATIC SWITCH
+
+BLYNK_WRITE(V0) {
+
+  int value = param.asInt();
+
+  autoMode = (value == 1);
+
+  if (autoMode) {
+
+    manualMode = false;
+
+    Blynk.virtualWrite(V1, 0);
+  }
+
+  Serial.println(autoMode ? "AUTOMATIC MODE ON" :
+                             "AUTOMATIC MODE OFF");
+
+  updatePump();
+}
+
+// V1 = MANUAL SWITCH
+
+BLYNK_WRITE(V1) {
+
+  int value = param.asInt();
+
+  manualMode = (value == 1);
+
+  if (manualMode) {
+
+    autoMode = false;
+
+    Blynk.virtualWrite(V0, 0);
+  }
+
+  Serial.println(manualMode ? "MANUAL MODE ON" :
+                               "MANUAL MODE OFF");
+
+  updatePump();
+}
+
+// ================= BLYNK CONNECTION =================
+
+BLYNK_CONNECTED() {
+
+  Serial.println("Connected to Blynk!");
+
+  // Restore switch states from Blynk
+
+  Blynk.syncVirtual(V0, V1);
+}
+
+// ================= SENSOR READING =================
+
+void readSensors() {
+
+  // -------- DHT11 --------
+
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+
+  if (!isnan(temp) && !isnan(hum)) {
+
+    temperature = limitValue(temp, 0, 80);
+    humidity = limitValue(hum, 0, 100);
+
+    dhtValid = true;
+  }
+  else {
+
+    dhtValid = false;
+
+    Serial.println("DHT11 Read Error!");
+  }
+
+  // -------- SOIL MOISTURE --------
+
+  int soilRaw = readAverage(SOIL_PIN);
+
+  // Convert raw reading into percentage
+
+  soilMoisture = map(
+    soilRaw,
+    SOIL_DRY,
+    SOIL_WET,
+    0,
+    100
+  );
+
+  soilMoisture = limitValue(soilMoisture, 0, 100);
+
+  // -------- LIGHT INTENSITY --------
+
+  int ldrRaw = readAverage(LDR_PIN);
+
+  // Higher ADC reading = higher light percentage
+  // This assumes LDR is connected to 3.3V
+  // and a 10K resistor is connected to GND.
+
+  lightIntensity = map(ldrRaw, 0, 4095, 0, 100);
+
+  lightIntensity = limitValue(lightIntensity, 0, 100);
+
+  // -------- TDS SENSOR --------
+
+  // Average ADC voltage in                                                                                                                                                   
+millivolts
+
+  long voltageSum = 0;
+
+  for (int i = 0; i < 20; i++) {
+
+    voltageSum += analogReadMilliVolts(TDS_PIN);
+
+    delay(2);
+  }
+
+  float voltage = (voltageSum / 20.0) / 1000.0;
+
+  // Temperature compensation
+
+  float compensationCoefficient =
+      1.0 + 0.02 * (temperature - 25.0);
+
+  float compensatedVoltage =
+      voltage / compensationCoefficient;
+
+  // TDS calculation
+
+  float rawTDS =
+      (133.42 * pow(compensatedVoltage, 3)
+      - 255.86 * pow(compensatedVoltage, 2)
+      + 857.39 * compensatedVoltage) * 0.5;
+
+  tdsValue = limitValue(rawTDS, 0, 2000);
+
+  // -------- SEND DATA TO BLYNK --------
+
+  if (Blynk.connected()) {
+
+    Blynk.virtualWrite(V2, temperature);
+    Blynk.virtualWrite(V3, humidity);
+    Blynk.virtualWrite(V4, soilMoisture);
+    Blynk.virtualWrite(V5, tdsValue);
+    Blynk.virtualWrite(V6, lightIntensity);
+  }
+
+  // -------- SERIAL MONITOR --------
+
+  Serial.println("==========================");
+
+  Serial.print("Temperature: ");
+  Serial.println(temperature);
+
+  Serial.print("Humidity: ");
+  Serial.println(humidity);
+
+  Serial.print("Soil Raw: ");
+  Serial.println(soilRaw);
+
+  Serial.print("Soil Moisture: ");
+  Serial.println(soilMoisture);
+
+  Serial.print("TDS: ");
+  Serial.println(tdsValue);
+
+  Serial.print("Light: ");
+  Serial.println(lightIntensity);
+
+  Serial.print("Auto Mode: ");
+  Serial.println(autoMode);
+
+  Serial.print("Manual Mode: ");
+  Serial.println(manualMode);
+
+  Serial.print("Pump: ");
+  Serial.println(pumpState ? "ON" : "OFF");
+
+  Serial.println("==========================");
+
+  // Update pump according to the latest soil reading
+
+  updatePump();
+}
+
+// ================= SETUP =================
+
+void setup() {
+
+  Serial.begin(115200);
+
+  // Relay initialization
+
+  pinMode(RELAY_PIN, OUTPUT);
+
+  digitalWrite(RELAY_PIN, RELAY_OFF);
+
+  pumpState = false;
+
+  // ADC Configuration
+
+  analogReadResolution(12);
+
+  analogSetPinAttenuation(SOIL_PIN, ADC_11db);
+  analogSetPinAttenuation(LDR_PIN, ADC_11db);
+  analogSetPinAttenuation(TDS_PIN, ADC_11db);
+
+  // Start DHT11
+
+  dht.begin();
+
+  // Initial sensor reading
+
+  readSensors();
+
+  // Connect to Blynk
+
+  Blynk.begin(
+    BLYNK_AUTH_TOKEN,
+    ssid,
+    pass
+  );
+
+  // Read sensors every 2 seconds
+
+  timer.setInterval(2000L, readSensors);
+}
+
+// ================= MAIN LOOP =================
+
+void loop() {
+
+  Blynk.run();
+
+  timer.run();
+}
