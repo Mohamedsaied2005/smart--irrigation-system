@@ -63,3 +63,6 @@ Dr. Mohamed Torad
 ## Circuit Diagram
 
 ![Smart Irrigation Circuit Diagram](photo_6051072642317488310_y.jpg)
+## Project Photos
+
+![Smart Irrigation Project](photo_6051072642317488311_y.jpg)
